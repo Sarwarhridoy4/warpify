@@ -117,62 +117,75 @@ uninstall:
 # -----------------------------
 appimage: build icon $(BUILD_DIR)/$(APP_NAME).desktop
 	@echo "📦 Creating AppImage..."
-	@set -e; \
-	APPDIR=$(BUILD_DIR)/$(APP_NAME).AppDir; \
-	# Create necessary directories
-	mkdir -p $$APPDIR/usr/bin $$APPDIR/usr/share/applications $$APPDIR/usr/share/icons/hicolor/$(ICON_SIZE)x$(ICON_SIZE)/apps; \
-	# Copy binary
-	cp $(BUILD_DIR)/$(APP_NAME) $$APPDIR/usr/bin/; \
-	# Copy icon
-	cp Icon.png $$APPDIR/usr/share/icons/hicolor/$(ICON_SIZE)x$(ICON_SIZE)/apps/$(APP_NAME).png; \
-	# Copy desktop file
-	cp $(BUILD_DIR)/$(APP_NAME).desktop $$APPDIR/usr/share/applications/$(APP_NAME).desktop; \
-	# Create AppRun script
-	printf '%s\n' '#!/bin/bash' \
-	'SELF=$$(readlink -f "$$0")' \
-	'HERE=$${SELF%/*}' \
-	'export PATH="$${HERE}/usr/bin:$${PATH}"' \
-	'export LD_LIBRARY_PATH="$${HERE}/usr/lib:$${LD_LIBRARY_PATH}"' \
-	'cd "$${HERE}/usr/bin"' \
-	'exec "./$(APP_NAME)" "$$@"' \
-	> $$APPDIR/AppRun; \
-	chmod +x $$APPDIR/AppRun; \
-	# Download appimagetool if missing
-	if [ ! -f "tools/appimagetool-x86_64.AppImage" ]; then \
-		mkdir -p tools; \
-		wget -q -O tools/appimagetool-x86_64.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage; \
+	@rm -rf $(BUILD_DIR)/$(APP_NAME).AppDir
+	@mkdir -p $(BUILD_DIR)/$(APP_NAME).AppDir/usr/bin
+	@mkdir -p $(BUILD_DIR)/$(APP_NAME).AppDir/usr/share/applications
+	@mkdir -p $(BUILD_DIR)/$(APP_NAME).AppDir/usr/share/icons/hicolor/$(ICON_SIZE)x$(ICON_SIZE)/apps
+	@echo "  Copying binary..."
+	@cp $(BUILD_DIR)/$(APP_NAME) $(BUILD_DIR)/$(APP_NAME).AppDir/usr/bin/
+	@echo "  Copying icon..."
+	@cp Icon.png $(BUILD_DIR)/$(APP_NAME).AppDir/usr/share/icons/hicolor/$(ICON_SIZE)x$(ICON_SIZE)/apps/$(APP_NAME).png
+	@cp Icon.png $(BUILD_DIR)/$(APP_NAME).AppDir/$(APP_NAME).png
+	@cp Icon.png $(BUILD_DIR)/$(APP_NAME).AppDir/.DirIcon
+	@echo "  Copying desktop file..."
+	@cp $(BUILD_DIR)/$(APP_NAME).desktop $(BUILD_DIR)/$(APP_NAME).AppDir/usr/share/applications/
+	@cp $(BUILD_DIR)/$(APP_NAME).desktop $(BUILD_DIR)/$(APP_NAME).AppDir/
+	@echo "  Creating AppRun..."
+	@printf '%s\n' \
+		'#!/bin/bash' \
+		'SELF=$$(readlink -f "$$0")' \
+		'HERE=$${SELF%/*}' \
+		'export PATH="$${HERE}/usr/bin:$${PATH}"' \
+		'export LD_LIBRARY_PATH="$${HERE}/usr/lib:$${LD_LIBRARY_PATH}"' \
+		'exec "$${HERE}/usr/bin/$(APP_NAME)" "$$@"' \
+		> $(BUILD_DIR)/$(APP_NAME).AppDir/AppRun
+	@chmod +x $(BUILD_DIR)/$(APP_NAME).AppDir/AppRun
+	@echo "  Downloading appimagetool..."
+	@mkdir -p tools
+	@if [ ! -f "tools/appimagetool-x86_64.AppImage" ]; then \
+		wget -q --show-progress -O tools/appimagetool-x86_64.AppImage \
+			https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage || \
+		(echo "❌ Failed to download appimagetool" && exit 1); \
 		chmod +x tools/appimagetool-x86_64.AppImage; \
-	fi; \
-	# Build AppImage
-	ARCH=x86_64 tools/appimagetool-x86_64.AppImage $$APPDIR $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-x86_64.AppImage; \
-	chmod +x $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-x86_64.AppImage; \
-	echo "✓ AppImage created: $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-x86_64.AppImage"
-
+	fi
+	@echo "  Building AppImage..."
+	@ARCH=x86_64 tools/appimagetool-x86_64.AppImage $(BUILD_DIR)/$(APP_NAME).AppDir $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-x86_64.AppImage >/dev/null 2>&1 || \
+		(echo "❌ AppImage build failed" && exit 1)
+	@chmod +x $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-x86_64.AppImage
+	@echo "✓ AppImage created: $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-x86_64.AppImage"
+	@ls -lh $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-x86_64.AppImage | awk '{print "  Size: " $$5}'
 
 # -----------------------------
 # Debian package target
 # -----------------------------
 deb: build icon $(BUILD_DIR)/$(APP_NAME).desktop
 	@echo "📦 Creating Debian package..."
-	@set -e; \
-	DEB_DIR=$(BUILD_DIR)/deb; \
-	mkdir -p $$DEB_DIR/DEBIAN $$DEB_DIR/usr/bin $$DEB_DIR/usr/share/applications $$DEB_DIR/usr/share/icons/hicolor/$(ICON_SIZE)x$(ICON_SIZE)/apps; \
-	cp $(BUILD_DIR)/$(APP_NAME) $$DEB_DIR/usr/bin/; \
-	cp Icon.png $$DEB_DIR/usr/share/icons/hicolor/$(ICON_SIZE)x$(ICON_SIZE)/apps/$(APP_NAME).png; \
-	cp $(BUILD_DIR)/$(APP_NAME).desktop $$DEB_DIR/usr/share/applications/; \
-	\
-	printf '%s\n' \
-	'Package: $(APP_NAME)' \
-	'Version: $(VERSION)' \
-	'Section: utils' \
-	'Priority: optional' \
-	'Architecture: amd64' \
-	'Depends: libc6, libgtk-3-0' \
-	'Maintainer: Your Name <you@example.com>' \
-	'Description: Warpify - Secure local file sharing' \
-	> $$DEB_DIR/DEBIAN/control; \
-	dpkg-deb --build $$DEB_DIR $(BUILD_DIR)/$(APP_NAME)_$(VERSION)_amd64.deb; \
-	echo "✓ Debian package created: $(BUILD_DIR)/$(APP_NAME)_$(VERSION)_amd64.deb"
+	@rm -rf $(BUILD_DIR)/deb
+	@mkdir -p $(BUILD_DIR)/deb/DEBIAN
+	@mkdir -p $(BUILD_DIR)/deb/usr/bin
+	@mkdir -p $(BUILD_DIR)/deb/usr/share/applications
+	@mkdir -p $(BUILD_DIR)/deb/usr/share/icons/hicolor/$(ICON_SIZE)x$(ICON_SIZE)/apps
+	@echo "  Copying files..."
+	@cp $(BUILD_DIR)/$(APP_NAME) $(BUILD_DIR)/deb/usr/bin/
+	@cp Icon.png $(BUILD_DIR)/deb/usr/share/icons/hicolor/$(ICON_SIZE)x$(ICON_SIZE)/apps/$(APP_NAME).png
+	@cp $(BUILD_DIR)/$(APP_NAME).desktop $(BUILD_DIR)/deb/usr/share/applications/
+	@echo "  Creating control file..."
+	@printf '%s\n' \
+		'Package: $(APP_NAME)' \
+		'Version: $(VERSION)' \
+		'Section: utils' \
+		'Priority: optional' \
+		'Architecture: amd64' \
+		'Depends: libc6, libgtk-3-0' \
+		'Maintainer: Your Name <you@example.com>' \
+		'Description: Warpify - Secure local file sharing' \
+		' Fast and secure file sharing over local network' \
+		> $(BUILD_DIR)/deb/DEBIAN/control
+	@echo "  Building package..."
+	@dpkg-deb --build $(BUILD_DIR)/deb $(BUILD_DIR)/$(APP_NAME)_$(VERSION)_amd64.deb >/dev/null 2>&1 || \
+		(echo "❌ Debian package build failed" && exit 1)
+	@echo "✓ Debian package created: $(BUILD_DIR)/$(APP_NAME)_$(VERSION)_amd64.deb"
+	@ls -lh $(BUILD_DIR)/$(APP_NAME)_$(VERSION)_amd64.deb | awk '{print "  Size: " $$5}'
 
 # -----------------------------
 # Release target
@@ -189,10 +202,17 @@ release: clean build appimage deb
 		cp README.md $(BUILD_DIR)/release/; \
 	else \
 		echo "# Warpify v$(VERSION)" > $(BUILD_DIR)/release/README.md; \
+		echo "" >> $(BUILD_DIR)/release/README.md; \
+		echo "Secure local file sharing application" >> $(BUILD_DIR)/release/README.md; \
 	fi
 	@cd $(BUILD_DIR) && tar -czf $(APP_NAME)-$(VERSION)-linux-amd64.tar.gz release/
 	@echo "✓ Release package created: $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-linux-amd64.tar.gz"
 	@ls -lh $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-linux-amd64.tar.gz | awk '{print "  Size: " $$5}'
+	@echo ""
+	@echo "Release contents:"
+	@echo "  - $(APP_NAME) binary"
+	@echo "  - $(APP_NAME)-$(VERSION)-x86_64.AppImage"
+	@echo "  - $(APP_NAME)_$(VERSION)_amd64.deb"
 
 run: build
 	@echo "🚀 Running $(APP_NAME)..."
