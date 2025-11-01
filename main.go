@@ -762,6 +762,9 @@ func receiveFile(w fyne.Window, o incomingOffer, path string) {
 	start := time.Now()
 	last := start
 
+	// Remove read deadline for data transfer
+	o.conn.SetReadDeadline(time.Time{})
+
 	for rcvd < o.size && !cancelled {
 		toRead := int64(len(buf))
 		if o.size-rcvd < toRead {
@@ -773,7 +776,7 @@ func receiveFile(w fyne.Window, o incomingOffer, path string) {
 			if _, werr := f.Write(buf[:n]); werr != nil {
 				fyne.Do(func() {
 					prog.dialog.Hide()
-					dialog.ShowError(werr, w)
+					dialog.ShowError(fmt.Errorf("write error: %v", werr), w)
 				})
 				os.Remove(tmp)
 				return
@@ -796,14 +799,16 @@ func receiveFile(w fyne.Window, o incomingOffer, path string) {
 		}
 		
 		if err != nil {
-			if err != io.EOF {
-				fyne.Do(func() {
-					prog.dialog.Hide()
-					dialog.ShowError(err, w)
-				})
-				os.Remove(tmp)
+			if err == io.EOF && rcvd >= o.size {
+				// Normal end of transfer
+				break
 			}
-			break
+			fyne.Do(func() {
+				prog.dialog.Hide()
+				dialog.ShowError(fmt.Errorf("transfer error: %v (received %d/%d bytes)", err, rcvd, o.size), w)
+			})
+			os.Remove(tmp)
+			return
 		}
 	}
 
@@ -812,10 +817,22 @@ func receiveFile(w fyne.Window, o incomingOffer, path string) {
 		return
 	}
 
-	if hex.EncodeToString(h.Sum(nil)) != o.checksum {
+	// Verify we received all data
+	if rcvd != o.size {
 		fyne.Do(func() {
 			prog.dialog.Hide()
-			dialog.ShowError(fmt.Errorf("checksum mismatch"), w)
+			dialog.ShowError(fmt.Errorf("incomplete transfer: received %d bytes, expected %d", rcvd, o.size), w)
+		})
+		os.Remove(tmp)
+		return
+	}
+
+	// Verify checksum
+	receivedChecksum := hex.EncodeToString(h.Sum(nil))
+	if receivedChecksum != o.checksum {
+		fyne.Do(func() {
+			prog.dialog.Hide()
+			dialog.ShowError(fmt.Errorf("checksum mismatch: expected %s, got %s", o.checksum, receivedChecksum), w)
 		})
 		os.Remove(tmp)
 		return
@@ -824,7 +841,7 @@ func receiveFile(w fyne.Window, o incomingOffer, path string) {
 	if err := f.Sync(); err != nil {
 		fyne.Do(func() {
 			prog.dialog.Hide()
-			dialog.ShowError(err, w)
+			dialog.ShowError(fmt.Errorf("sync error: %v", err), w)
 		})
 		os.Remove(tmp)
 		return
@@ -834,7 +851,7 @@ func receiveFile(w fyne.Window, o incomingOffer, path string) {
 	if err := os.Rename(tmp, path); err != nil {
 		fyne.Do(func() {
 			prog.dialog.Hide()
-			dialog.ShowError(err, w)
+			dialog.ShowError(fmt.Errorf("rename error: %v", err), w)
 		})
 		os.Remove(tmp)
 		return
@@ -1037,11 +1054,13 @@ func initiateSend(w fyne.Window, peer *Peer, path string, info os.FileInfo) {
 func sendFile(ip string, port int, originalPath string, prog *transferProgress, cancelled *bool) error {
 	info, err := os.Stat(originalPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("stat file: %w", err)
 	}
 	isDir := info.IsDir()
 
 	var zipPath string
+	var actualSize int64
+	
 	if isDir {
 		fyne.Do(func() {
 			prog.label.SetText("Creating archive…")
@@ -1049,19 +1068,23 @@ func sendFile(ip string, port int, originalPath string, prog *transferProgress, 
 		
 		zipPath, err = createZip(originalPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("create zip: %w", err)
 		}
 		defer os.Remove(zipPath)
-		originalPath = zipPath
+		
 		info, err = os.Stat(zipPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("stat zip: %w", err)
 		}
+		actualSize = info.Size()
+		originalPath = zipPath
+	} else {
+		actualSize = info.Size()
 	}
 
 	f, err := os.Open(originalPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("open file: %w", err)
 	}
 	defer f.Close()
 
@@ -1071,11 +1094,11 @@ func sendFile(ip string, port int, originalPath string, prog *transferProgress, 
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return err
+		return fmt.Errorf("calculate checksum: %w", err)
 	}
 	checksum := hex.EncodeToString(h.Sum(nil))
 	if _, err := f.Seek(0, 0); err != nil {
-		return err
+		return fmt.Errorf("seek file: %w", err)
 	}
 
 	fyne.Do(func() {
@@ -1084,13 +1107,14 @@ func sendFile(ip string, port int, originalPath string, prog *transferProgress, 
 
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, port), 10*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("connect: %w", err)
 	}
 	defer conn.Close()
 	
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
+		tc.SetNoDelay(true)
 	}
 
 	filename := filepath.Base(originalPath)
@@ -1101,35 +1125,35 @@ func sendFile(ip string, port int, originalPath string, prog *transferProgress, 
 
 	// Send protocol header
 	if err := binary.Write(conn, binary.BigEndian, uint8(protocolVersion)); err != nil {
-		return err
+		return fmt.Errorf("write protocol version: %w", err)
 	}
 	if err := binary.Write(conn, binary.BigEndian, uint32(len(filename))); err != nil {
-		return err
+		return fmt.Errorf("write filename length: %w", err)
 	}
 	if _, err := conn.Write([]byte(filename)); err != nil {
-		return err
+		return fmt.Errorf("write filename: %w", err)
 	}
-	if err := binary.Write(conn, binary.BigEndian, uint64(info.Size())); err != nil {
-		return err
+	if err := binary.Write(conn, binary.BigEndian, uint64(actualSize)); err != nil {
+		return fmt.Errorf("write file size: %w", err)
 	}
 	if err := binary.Write(conn, binary.BigEndian, uint32(len(checksum))); err != nil {
-		return err
+		return fmt.Errorf("write checksum length: %w", err)
 	}
 	if _, err := conn.Write([]byte(checksum)); err != nil {
-		return err
+		return fmt.Errorf("write checksum: %w", err)
 	}
 	if err := binary.Write(conn, binary.BigEndian, uint32(len(myHostname))); err != nil {
-		return err
+		return fmt.Errorf("write hostname length: %w", err)
 	}
 	if _, err := conn.Write([]byte(myHostname)); err != nil {
-		return err
+		return fmt.Errorf("write hostname: %w", err)
 	}
 
 	// Wait for acceptance
 	resp := make([]byte, 1)
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	if _, err := io.ReadFull(conn, resp); err != nil {
-		return err
+		return fmt.Errorf("read acceptance response: %w", err)
 	}
 	conn.SetReadDeadline(time.Time{})
 	
@@ -1139,36 +1163,45 @@ func sendFile(ip string, port int, originalPath string, prog *transferProgress, 
 
 	fyne.Do(func() {
 		prog.label.SetText("Transferring…")
+		prog.total = actualSize
 	})
 
-	// Send file data
+	// Send file data with proper error handling
 	buf := make([]byte, transferBufLen)
 	r := bufio.NewReader(f)
 	var sent int64
 	start := time.Now()
 	last := start
 	
-	for !*cancelled {
+	for !*cancelled && sent < actualSize {
 		n, err := r.Read(buf)
 		if n > 0 {
+			// Ensure all data is written
+			toWrite := buf[:n]
 			written := 0
+			
 			for written < n && !*cancelled {
-				m, werr := conn.Write(buf[written:n])
+				m, werr := conn.Write(toWrite[written:])
 				if werr != nil {
-					return werr
+					return fmt.Errorf("write data at %d/%d: %w", sent, actualSize, werr)
 				}
 				written += m
 			}
+			
+			if *cancelled {
+				return fmt.Errorf("cancelled by user")
+			}
+			
 			sent += int64(n)
 
 			now := time.Now()
 			if now.Sub(last) > updateInterval {
 				spd := float64(sent) / now.Sub(start).Seconds()
 				fyne.Do(func() {
-					prog.bar.SetValue(float64(sent) / float64(prog.total))
+					prog.bar.SetValue(float64(sent) / float64(actualSize))
 					prog.label.SetText(fmt.Sprintf("%s / %s • %s/s",
 						humanBytes(uint64(sent)),
-						humanBytes(uint64(prog.total)),
+						humanBytes(uint64(actualSize)),
 						humanBytes(uint64(spd))))
 				})
 				last = now
@@ -1179,12 +1212,23 @@ func sendFile(ip string, port int, originalPath string, prog *transferProgress, 
 			if err == io.EOF {
 				break
 			}
-			return err
+			return fmt.Errorf("read file at %d/%d: %w", sent, actualSize, err)
 		}
 	}
 	
 	if *cancelled {
 		return fmt.Errorf("cancelled by user")
+	}
+	
+	// Verify we sent all data
+	if sent != actualSize {
+		return fmt.Errorf("incomplete send: sent %d bytes, expected %d", sent, actualSize)
+	}
+	
+	// Ensure all data is flushed to the network
+	if _, ok := conn.(*net.TCPConn); ok {
+		// Allow receiver to finish reading
+		time.Sleep(100 * time.Millisecond)
 	}
 	
 	return nil
